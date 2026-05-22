@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intrinsic Plagiarism Detector</title>
+    <link rel="stylesheet" href="static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+</head>
+<body>
+
+    <div class="upload-container">
+        <h1>Intrinsic Plagiarism Detector</h1>
+        <p class="subtitle">Upload a PDF or paste your text to get started. You will receive a downloadable PDF report identifying segments with suspected plagiarism.</p>
+        
+        <!-- UX Notice: Prototype warning displayed clearly but unobtrusively -->
+        <div class="alert-notice" style="background-color: #fdf2e9; border-left: 4px solid #e67e22; padding: 12px; margin-bottom: 20px; border-radius: 4px; text-align: left;">
+            <p style="color: #c0392b; margin: 0; font-size: 0.9rem; line-height: 1.4;">
+                <strong>Prototype Notice:</strong> This detector currently uses an AI model in a prototype phase. Generated responses are not infallible, and a margin of error exists. Please note that only English text is supported; other languages will cause incorrect results.
+            </p>
+        </div>
+
+        <form id="uploadForm">
+            <div class="form-group">
+                <label class="label-title">Upload PDF Document</label>
+                <div class="drop-zone" id="dropZone">
+                    <input type="file" id="pdfInput" accept=".pdf" hidden>
+                    <div class="drop-zone-content">
+                        <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <span class="upload-text">Click to upload</span>
+                        <span class="upload-hint">PDF files only</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider">
+                <span>OR</span>
+            </div>
+
+            <div class="form-group">
+                <label for="textInput" class="label-title">Paste Text</label>
+                <textarea id="textInput" placeholder="Enter your text here..." rows="6"></textarea>
+            </div>
+
+            <button type="submit" class="submit-btn">Perform Analysis</button>
+        </form>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <script>
+    // Configure PDF.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+    const dropZone = document.getElementById('dropZone');
+    const pdfInput = document.getElementById('pdfInput');
+    const uploadForm = document.getElementById('uploadForm');
+    const textInput = document.getElementById('textInput');
+
+    dropZone.addEventListener('click', () => pdfInput.click());
+
+    pdfInput.addEventListener('change', () => {
+        if (pdfInput.files.length > 0) {
+            document.querySelector('.upload-text').textContent = pdfInput.files[0].name;
+        }
+    });
+
+    // Extract text from PDF using PDF.js
+    async function extraerTextoDePDF(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let textoCompleto = "";
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const pagina = await pdf.getPage(i);
+            const contenidoTexto = await pagina.getTextContent();
+            const textoPagina = contenidoTexto.items.map(item => item.str).join(" ");
+            textoCompleto += textoPagina + " ";
+        }
+
+        return textoCompleto.trim();
+    }
+
+    // Submit event handler with localized validations
+    uploadForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const tieneArchivo = pdfInput.files && pdfInput.files.length > 0;
+        const textoPegado = textInput.value.trim();
+        let textoAValidar = "";
+
+        // 1. VALIDATION: Missing input data
+        if (!tieneArchivo && !textoPegado) {
+            Swal.fire({
+                icon: 'error',
+                title: 'Bad Request',
+                text: 'Please upload a PDF file or paste some text into the box to continue.',
+                confirmButtonColor: '#3085d6'
+            });
+            return;
+        }
+
+        if (tieneArchivo) {
+            try {
+                textoAValidar = await extraerTextoDePDF(pdfInput.files[0]);
+            } catch (error) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Bad Request',
+                    text: 'Could not read the PDF content. Please make sure the file is not password-protected or corrupted.',
+                    confirmButtonColor: '#3085d6'
+                });
+                return;
+            }
+        } else {
+            textoAValidar = textoPegado;
+        }
+
+        // 2. VALIDATION: Text Length Constraints
+        const longitud = textoAValidar.length;
+        if (longitud < 1000 || longitud > 180000) {
+            Swal.fire({
+                icon: 'error',
+                title: 'Bad Request',
+                text: `The text must be between 1,000 and 180,000 characters long. Currently detected: ${longitud.toLocaleString()}`,
+                confirmButtonText: 'Got it',
+                confirmButtonColor: '#3085d6'
+            });
+            return;
+        }
+
+        // 3. VALIDATION: Alphanumeric characters presence Check
+        const tieneAlfanumericos = /[a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]/.test(textoAValidar);
+        if (!tieneAlfanumericos) {
+            Swal.fire({
+                icon: 'error',
+                title: 'Bad Request',
+                text: 'The document cannot contain only special characters.',
+                confirmButtonText: 'Got it',
+                confirmButtonColor: '#3085d6'
+            });
+            return;
+        }
+
+        // Loading state (BERT / SVM Analysis)
+        Swal.fire({
+            title: 'Analyzing document...',
+            text: 'Please wait while our AI model processes the text.',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+            }
+        });
+
+        const formData = new FormData();
+        if (tieneArchivo) {
+            formData.append('file', pdfInput.files[0]);
+        }
+        formData.append('textInput', textoPegado);
+
+        try {
+            const response = await fetch('/analyze-plagiarism/', {
+                method: 'POST',
+                body: formData 
+            });
+
+            if (!response.ok) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Server Error',
+                    text: 'Sorry, something went wrong while processing the analysis.',
+                    confirmButtonColor: '#3085d6'
+                });
+                return;
+            }
+
+            // Render view injection
+            const htmlDelVisor = await response.text();
+            Swal.close();
+
+            document.open();
+            document.write(htmlDelVisor);
+            document.close();
+
+        } catch (error) {
+            console.error("Network connection error:", error);
+            Swal.fire({
+                icon: 'error',
+                title: 'Network Error',
+                text: 'Could not connect to the server. Please check your internet connection.',
+                confirmButtonColor: '#3085d6'
+            });
+        }
+    });
+    </script>
+</body>
+</html>
