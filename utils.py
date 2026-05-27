@@ -2,27 +2,97 @@ import re
 import io
 import numpy as np
 import torch
+import torch.nn as nn
 import joblib
 from transformers import BertTokenizer, BertModel
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_JUSTIFY
+from huggingface_hub import hf_hub_download
+
+REPO_MODELS = "Vocalin/intrinsec-plagiarism-detection-model"
 
 MODELO_BERT      = "bert-base-uncased"
 MAX_LEN          = 512
 BATCH_SIZE       = 8
-PALABRAS_VENTANA = 250
+PALABRAS_VENTANA = 200
 TRASLAPE         = 0.25
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
 
-def inicializar_transformadores():
-    """Carga los modelos pesados una sola vez al iniciar el servidor."""
-    tokenizer = BertTokenizer.from_pretrained(MODELO_BERT)
-    bert_model = BertModel.from_pretrained(MODELO_BERT).to(DEVICE)
-    svm = joblib.load("svm_embeddings_global.joblib")
-    return tokenizer, bert_model, svm
+HIDDEN_DIM       = 256
+DROPOUT          = 0.3
 
+class BertMLP(nn.Module):
+    def __init__(self, bert, hidden_dim=256, n_classes=2, dropout=0.3):
+        super().__init__()
+        self.bert = bert
+        self.classifier = nn.Sequential(
+            nn.Linear(768, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, n_classes),
+        )
+
+    def encode(self, input_ids, attention_mask, token_type_ids):
+        outputs = self.bert(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            output_hidden_states=True,
+        )
+        hidden = torch.stack(outputs.hidden_states[-4:], dim=0).sum(dim=0)
+
+        mascara = attention_mask.clone()
+        mascara[:, 0] = 0
+        last_real = mascara.sum(dim=1, keepdim=True) - 1
+        mascara.scatter_(1, last_real.clamp(min=0), 0)
+
+        mascara_exp = mascara.unsqueeze(-1).float()
+        suma_tokens = (hidden * mascara_exp).sum(dim=1)
+        n_tokens    = mascara_exp.sum(dim=1).clamp(min=1e-9)
+        return suma_tokens / n_tokens
+
+    def forward(self, input_ids_A, attention_mask_A, token_type_ids_A,
+                      input_ids_B, attention_mask_B, token_type_ids_B):
+        emb_A = self.encode(input_ids_A, attention_mask_A, token_type_ids_A)
+        emb_B = self.encode(input_ids_B, attention_mask_B, token_type_ids_B)
+        return self.classifier(emb_A + emb_B)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INICIALIZACIÓN 
+# ─────────────────────────────────────────────────────────────────────────────
+def inicializar_transformadores():
+    """Carga la arquitectura BertMLP con los pesos fine-tuned y el SVM."""
+    #Descargar modelos de hugging face
+    bert_pt = hf_hub_download(
+        repo_id=REPO_MODELS, 
+        filename="mejor_modelo_bert_4.pt"
+    )
+
+    svm_trained = hf_hub_download(
+        repo_id=REPO_MODELS, 
+        filename="svm_embeddings_promedio_doc.joblib"
+    )
+
+    tokenizer = BertTokenizer.from_pretrained(MODELO_BERT)
+    
+    bert_base = BertModel.from_pretrained(MODELO_BERT)
+    modelo_ft = BertMLP(bert_base, hidden_dim=HIDDEN_DIM, dropout=DROPOUT).to(DEVICE)
+    
+    modelo_ft.load_state_dict(torch.load(bert_pt, map_location=DEVICE))
+    modelo_ft.eval()
+    
+    # Cargar SVM
+    svm = joblib.load(svm_trained)
+    
+    return tokenizer, modelo_ft, svm
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEGMENTACIÓN
+# ─────────────────────────────────────────────────────────────────────────────
 def segmentar_texto(texto, n_palabras, traslape):
     tokens = [(m.group(), m.start(), m.end()) for m in re.finditer(r'\S+', texto)]
     if not tokens:
@@ -52,8 +122,12 @@ def segmentar_texto(texto, n_palabras, traslape):
 
     return segmentos
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EMBEDDINGS CON BERT FINE-TUNED
+# ─────────────────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def obtener_embeddings(textos, modelo, tokenizer):
+    """Genera embeddings usando modelo.encode de BertMLP."""
     modelo.eval()
     todos = []
 
@@ -65,44 +139,45 @@ def obtener_embeddings(textos, modelo, tokenizer):
             padding="max_length",
             truncation=True,
             return_tensors="pt",
-        ).to(DEVICE)
-
-        outputs = modelo(**enc, output_hidden_states=True)
-
-        # Suma últimas 4 capas
-        hidden = torch.stack(outputs.hidden_states[-4:], dim=0).sum(dim=0)
-
-        # Mean pooling corregido y optimizado
-        mascara = enc["attention_mask"].clone()
-        mascara[:, 0] = 0
-        last_real = mascara.sum(dim=1, keepdim=True) - 1
-        mascara.scatter_(1, last_real.clamp(min=0), 0)
-
-        mascara_exp = mascara.unsqueeze(-1).float()
-        suma_tokens = (hidden * mascara_exp).sum(dim=1)
-        n_tokens    = mascara_exp.sum(dim=1).clamp(min=1e-9)
+        )
         
-        todos.append((suma_tokens / n_tokens).cpu().numpy())
+        emb = modelo.encode(
+            enc["input_ids"].to(DEVICE),
+            enc["attention_mask"].to(DEVICE),
+            enc["token_type_ids"].to(DEVICE),
+        )
+        todos.append(emb.cpu().numpy())
 
     return np.vstack(todos).astype(np.float32)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESOLUCIÓN, FUSIÓN Y GENERACIÓN DE REPORTES (PDF Y WEB)
+# ─────────────────────────────────────────────────────────────────────────────
 def resolver_y_fusionar_zonas(segmentos, labels, texto):
+    if not segmentos:
+        return b"", ""
+
+    # Máscara estricta a nivel de carácter (Prioridad total a clase 1: Plagio)
+    mascara_caracteres = np.full(len(texto), -1, dtype=np.int8)
+
+    # Paso 1: Mapear Original (0)
+    for seg, label in zip(segmentos, labels):
+        if label == 0: 
+            mascara_caracteres[seg[1]:seg[2]] = 0
+            
+    # Paso 2: Sobrescribir con Plagio (1) para dar prioridad absoluta
+    for seg, label in zip(segmentos, labels):
+        if label == 1: 
+            mascara_caracteres[seg[1]:seg[2]] = 1
+
+    # Preparar PDF en memoria con ReportLab
     pdf_en_memoria = io.BytesIO()
     doc = SimpleDocTemplate(
         pdf_en_memoria, 
         pagesize=letter,
         rightMargin=40, leftMargin=40, topMargin=50, bottomMargin=50
     )
-
-    if not segmentos:
-        return b"", ""
-
-    # Mapeo de caracteres eficiente
-    mascara_caracteres = np.full(len(texto), -1, dtype=np.int8)
-    for seg, label in zip(segmentos, labels):
-        if label == 0: mascara_caracteres[seg[1]:seg[2]] = 0
-    for seg, label in zip(segmentos, labels):
-        if label == 1: mascara_caracteres[seg[1]:seg[2]] = 1
 
     styles = getSampleStyleSheet()
     style_titulo = ParagraphStyle('TituloReporte', parent=styles['Heading1'], fontSize=22, leading=26, spaceAfter=15)
@@ -119,14 +194,12 @@ def resolver_y_fusionar_zonas(segmentos, labels, texto):
 
     parrafos_raw = texto.split('\n')
     indice_char_actual = 0
-    
-    # Lista para acumular los párrafos HTML destinados a viewer.html
     html_paginas_web = []
 
     for p_raw in parrafos_raw:
         if not p_raw.strip():
             historia.append(Spacer(1, 6))
-            html_paginas_web.append("<br>") # Mantiene el espacio en la web
+            html_paginas_web.append("<br>")
             indice_char_actual += len(p_raw) + 1
             continue
 
@@ -140,7 +213,7 @@ def resolver_y_fusionar_zonas(segmentos, labels, texto):
 
             if es_plagio_actual and not en_plagio:
                 html_pdf.append("<font backcolor='yellow'>")
-                html_web.append("<mark class='resaltado-plagio'>") # Clase CSS limpia para la web
+                html_web.append("<mark class='resaltado-plagio'>")
                 en_plagio = True
             elif not es_plagio_actual and en_plagio:
                 html_pdf.append("</font>")
@@ -158,24 +231,29 @@ def resolver_y_fusionar_zonas(segmentos, labels, texto):
 
         indice_char_actual += 1 
         
-        # Guardamos en la estructura del PDF y de la Web respectivamente
         historia.append(Paragraph("".join(html_pdf), style_cuerpo))
         html_paginas_web.append(f"<p>{''.join(html_web)}</p>")
 
     doc.build(historia)
     pdf_en_memoria.seek(0)
     
-    # Retornamos ambos resultados analizados
     return pdf_en_memoria.getvalue(), "".join(html_paginas_web)
 
 
-def modelo(texto, svm, bert, tokenizer):
-    segmentos = segmentar_texto(texto, PALABRAS_VENTANA, TRASLAPE)
-    if not segmentos:
-        return b"", ""
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE DE INFERENCIA DE MODELO
+# ─────────────────────────────────────────────────────────────────────────────
+def ejecutar_modelo(texto, svm, modelo_bert_ft, tokenizer):
+    """Pipeline principal equivalente al main() del segundo script."""
+    texto_limpio = texto.strip()
+    
+    segmentos = segmentar_texto(texto_limpio, PALABRAS_VENTANA, TRASLAPE)
+    if len(segmentos) < 2:
+        return b"", "<p>El texto es demasiado corto para ser analizado de forma intrínseca.</p>"
         
     textos_segs = [s[0] for s in segmentos]
-    embs        = obtener_embeddings(textos_segs, bert, tokenizer)
+    embs = obtener_embeddings(textos_segs, modelo_bert_ft, tokenizer)
+    
     emb_promedio = embs.mean(axis=0)
     
     idx_activos  = [i for i, s in enumerate(segmentos) if not s[3]]
@@ -185,4 +263,4 @@ def modelo(texto, svm, bert, tokenizer):
     X_inf  = embs_activos + emb_promedio
     labels = svm.predict(X_inf).tolist()
     
-    return resolver_y_fusionar_zonas(segs_activos, labels, texto)
+    return resolver_y_fusionar_zonas(segs_activos, labels, texto_limpio)
