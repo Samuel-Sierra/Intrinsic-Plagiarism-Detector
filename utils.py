@@ -1,4 +1,5 @@
 import re
+import os
 import io
 import numpy as np
 import torch
@@ -22,6 +23,8 @@ DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
 
 HIDDEN_DIM       = 256
 DROPOUT          = 0.3
+
+HF_TOKEN = os.getenv("HF_TOKEN", None)
 
 class BertMLP(nn.Module):
     def __init__(self, bert, hidden_dim=256, n_classes=2, dropout=0.3):
@@ -68,12 +71,14 @@ def inicializar_transformadores():
     #Descargar modelos de hugging face
     bert_pt = hf_hub_download(
         repo_id=REPO_MODELS, 
-        filename="mejor_modelo_bert_4.pt"
+        filename="mejor_modelo_bert_4.pt",
+        token=HF_TOKEN
     )
 
     svm_trained = hf_hub_download(
         repo_id=REPO_MODELS, 
-        filename="svm_embeddings_promedio_doc.joblib"
+        filename="svm_embeddings_promedio_doc.joblib",
+        token=HF_TOKEN
     )
 
     tokenizer = BertTokenizer.from_pretrained(MODELO_BERT)
