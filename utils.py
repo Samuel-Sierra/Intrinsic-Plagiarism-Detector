@@ -158,7 +158,6 @@ def resolver_y_fusionar_zonas(segmentos, labels, texto):
     if not segmentos:
         return b"", ""
 
-    # Máscara estricta a nivel de carácter (Prioridad total a clase 1: Plagio)
     mascara_caracteres = np.full(len(texto), -1, dtype=np.int8)
 
     # Paso 1: Mapear Original (0)
@@ -166,7 +165,7 @@ def resolver_y_fusionar_zonas(segmentos, labels, texto):
         if label == 0: 
             mascara_caracteres[seg[1]:seg[2]] = 0
             
-    # Paso 2: Sobrescribir con Plagio (1) para dar prioridad absoluta
+    # Paso 2: Sobrescribir con Plagio (1) 
     for seg, label in zip(segmentos, labels):
         if label == 1: 
             mascara_caracteres[seg[1]:seg[2]] = 1

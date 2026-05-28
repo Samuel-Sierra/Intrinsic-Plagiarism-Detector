@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import PyPDF2
-from utils import modelo, inicializar_transformadores
+from utils import ejecutar_modelo, inicializar_transformadores
 
 
 recursos_globales = {}
@@ -16,7 +16,6 @@ recursos_globales = {}
 async def lifespan(app: FastAPI):
     try:
         print("Cargando modelos en memoria RAM (SVM + BERT)...")
-        # Inicializa BERT y Tokenizer una sola vez
         tokenizer, bert_model, svm = inicializar_transformadores()
         
         recursos_globales["tokenizer"] = tokenizer
@@ -89,7 +88,7 @@ async def analyze_pdf(
 
         validate_text(texto_completo)
         
-        pdf_bytes_resultado, html_para_visor = modelo(
+        pdf_bytes_resultado, html_para_visor = ejecutar_modelo(
             texto_completo, 
             recursos_globales["detector_plagio"],
             recursos_globales["bert"],
