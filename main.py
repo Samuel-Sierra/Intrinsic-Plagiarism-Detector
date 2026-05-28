@@ -111,6 +111,10 @@ async def analyze_pdf(
 if __name__ == "__main__":
     import uvicorn
     import os
-    # Lee el puerto que Render te asigna, si no, usa el 8000 por defecto
+
+    # Render asigna un puerto dinámico en la variable de entorno PORT.
+    # Si corres en local y no existe, usará el 8000 por defecto.
     puerto = int(os.getenv("PORT", 8000))
+
+    # CRUCIAL: El host DEBE ser "0.0.0.0" para que Render pueda redirigir el tráfico
     uvicorn.run("main:app", host="0.0.0.0", port=puerto)
