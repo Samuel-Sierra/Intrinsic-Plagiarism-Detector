@@ -107,3 +107,10 @@ async def analyze_pdf(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el análisis de plagio: {str(e)}")
+    
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    # Lee el puerto que Render te asigna, si no, usa el 8000 por defecto
+    puerto = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=puerto)
